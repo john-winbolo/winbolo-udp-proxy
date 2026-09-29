@@ -1,0 +1,42 @@
+# Regional relay Caddyfile. Values in {$...} come from the caddy service's
+# environment (see docker-compose.yml / .env): RELAY_DOMAIN, METRICS_ALLOW_IP.
+#
+# RELAY_DOMAIN may list several hostnames separated by spaces, e.g.
+#   RELAY_DOMAIN=relay-au.winbolo.net relay-au.winbolo.com
+{$RELAY_DOMAIN} {
+	# Browser WebSocket join endpoint. Caddy upgrades WS transparently.
+	handle /proxy {
+		reverse_proxy 127.0.0.1:8085
+	}
+
+	# Load-aware relay probe for the lobby's "pick the fastest relay" logic.
+	# Served by the PROXY (not Caddy) so a response proves the proxy is really
+	# serving, and it returns {"status":"offline"} once the connection cap is
+	# reached. CORS + JSON come from the Go handler.
+	handle /ping {
+		reverse_proxy 127.0.0.1:8085
+	}
+
+	# Health + metrics, restricted by source IP.
+	# METRICS_ALLOW_IP is SPACE-separated for multiple entries, e.g.
+	#   METRICS_ALLOW_IP=203.0.113.10 10.0.0.0/8
+	@ops path /health /metrics
+	handle @ops {
+		@blocked not remote_ip {$METRICS_ALLOW_IP}
+		respond @blocked "Forbidden" 403
+		reverse_proxy 127.0.0.1:8085
+	}
+
+	# Everything else → temporary (302) redirect to the main site.
+	handle {
+		redir https://bolo.io 302
+	}
+
+	log {
+		output file /var/log/caddy/relay.log {
+			roll_size 100MiB
+			roll_keep 5
+		}
+		format json
+	}
+}

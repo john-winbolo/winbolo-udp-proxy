@@ -1,0 +1,6 @@
+# Compiled binary build artifact
+/src/winbolo-udp-proxy
+
+# Local deployment config (secrets/IPs) and logs — commit only the .env.example
+deploy/*/.env
+deploy/*/logs/

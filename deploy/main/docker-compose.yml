@@ -1,0 +1,39 @@
+# Main deployment: proxy ONLY, fronted by the shared Caddy that already runs
+# on this host (fronting many other services). The proxy joins that Caddy's
+# existing external network so Caddy can reach it by service name (proxy:8085).
+#
+# Add the site block from Caddyfile-snippet.txt to your shared Caddyfile.
+# Config lives in .env — copy .env.example to .env and fill it in, then:
+#   docker compose up -d
+services:
+  proxy:
+    build:
+      context: ../..           # repo root (where the Dockerfile lives)
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach WBN running on the host (Linux)
+    environment:
+      WBN_API_URL: ${WBN_API_URL}
+      WBN_API_INSECURE: ${WBN_API_INSECURE:-false}
+      ALLOWED_ORIGIN: ${ALLOWED_ORIGIN}
+      SERVER_ALLOWLIST: ${SERVER_ALLOWLIST}
+      LISTEN_ADDR: ":8085"
+      MAX_CONNECTIONS: ${MAX_CONNECTIONS}
+      RATE_LIMIT_PER_IP: ${RATE_LIMIT_PER_IP}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW}
+    # No published ports: the shared Caddy reaches the proxy by service name over
+    # the external network. Publishing 8085 would let clients hit the host
+    # directly and bypass Caddy's /metrics IP allowlist.
+    networks: [caddy]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8085/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  # The network your shared Caddy already uses. Adjust the name to match, e.g.
+  # "caddy" or "<caddy-project>_default". Must be created outside this stack.
+  caddy:
+    external: true

@@ -1,0 +1,56 @@
+# Regional relay: self-contained Caddy (TLS) + WS-UDP proxy.
+#
+# Deploy on a box that ALSO runs game servers (AU, EU, ...) so the browser's
+# WebSocket terminates in-region instead of routing via the US.
+#
+# Both services run on HOST networking. That's deliberate: the game server runs
+# directly on the host (not in Docker), and the WBN API hands back its PUBLIC IP.
+# A bridge-networked container can't reliably reach the host's own public IP
+# (Docker's NAT hairpin drops UDP), so the proxy shares the host network and
+# dials the game server exactly like any other host process would. The proxy
+# listens on 127.0.0.1:8085, so it's reachable by Caddy over loopback and by
+# nothing external.
+#
+# Config lives in .env — copy .env.example to .env and fill it in, then:
+#   docker compose up -d
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    network_mode: host         # binds :80/:443 directly; reaches the proxy at 127.0.0.1:8085
+    environment:
+      # Substituted into the Caddyfile via {$RELAY_DOMAIN} / {$METRICS_ALLOW_IP}
+      RELAY_DOMAIN: ${RELAY_DOMAIN}
+      METRICS_ALLOW_IP: ${METRICS_ALLOW_IP}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./logs/caddy:/var/log/caddy
+      - caddy_data:/data       # TLS certs — PERSIST this or you'll hit Let's Encrypt rate limits
+      - caddy_config:/config
+    depends_on: [proxy]
+
+  proxy:
+    build:
+      context: ../..           # repo root (where the Dockerfile lives)
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    network_mode: host         # shares the host network so it can reach the co-located
+                               # game server at its public IP, like a native host process
+    environment:
+      # Join codes are GLOBAL — regional relays resolve against the CENTRAL WBN.
+      WBN_API_URL: ${WBN_API_URL}
+      ALLOWED_ORIGIN: ${ALLOWED_ORIGIN}
+      SERVER_ALLOWLIST: ${SERVER_ALLOWLIST}
+      LISTEN_ADDR: "127.0.0.1:8085"   # host-local only: Caddy reaches it, nothing external can
+      MAX_CONNECTIONS: ${MAX_CONNECTIONS}
+      RATE_LIMIT_PER_IP: ${RATE_LIMIT_PER_IP}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8085/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  caddy_data:
+  caddy_config:

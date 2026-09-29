@@ -1,0 +1,36 @@
+# Add this site block to your EXISTING shared Caddyfile (the one already
+# fronting your other services). It routes to the "proxy" container from
+# deploy/main/docker-compose.yml over the shared network.
+#
+# Compared with a bare `reverse_proxy proxy:8085`, this adds:
+#   - /ping        load-aware relay probe for the lobby (served by the proxy)
+#   - /health,/metrics restricted to an IP allowlist
+#   - catch-all    temporary redirect to https://bolo.io
+
+relay.winbolo.net, relay.winbolo.com {
+	# Browser WebSocket join endpoint.
+	handle /proxy {
+		reverse_proxy proxy:8085
+	}
+
+	# Load-aware relay probe for the lobby's "pick the fastest relay" logic.
+	# Served by the proxy so a response proves the proxy is really serving, and
+	# it returns {"status":"offline"} once the connection cap is reached.
+	handle /ping {
+		reverse_proxy proxy:8085
+	}
+
+	# Health + metrics, restricted by source IP.
+	# SPACE-separated for multiple entries, e.g. `remote_ip 1.2.3.4 10.0.0.0/8`.
+	@ops path /health /metrics
+	handle @ops {
+		@blocked not remote_ip 203.0.113.10   # <-- replace with your monitoring IP(s)
+		respond @blocked "Forbidden" 403
+		reverse_proxy proxy:8085
+	}
+
+	# Everything else → temporary (302) redirect to the main site.
+	handle {
+		redir https://bolo.io 302
+	}
+}
