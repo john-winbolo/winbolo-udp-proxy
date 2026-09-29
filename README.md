@@ -24,20 +24,31 @@ Browser ──WebSocket──────>│                 │──UDP socke
 ## Connection lifecycle
 
 ```
-Client                          Proxy                         WBN API          Game Server
-  │                               │                              │                  │
-  │──WS connect ?join_code=xxx──>│                              │                  │
-  │                               │──GET /api/join/resolve──────>│                  │
-  │                               │<──{server_ip, player...}────│                  │
-  │                               │                              │                  │
-  │                               │──────────UDP dial───────────────────────────────>│
-  │                               │                              │                  │
-  │<──metadata frame (0x01)──────│                              │                  │
-  │                               │                              │                  │
-  │──binary WS frame────────────>│──UDP datagram──────────────────────────────────>│
-  │<──binary WS frame───────────│<──UDP datagram──────────────────────────────────│
-  │              ...              │              ...              │        ...       │
+Client                        Proxy                          WBN API         Game Server
+  │                             │                               │                 │
+  │── GET /proxy?join_code=… ──>│                               │                 │
+  │                             │ per-IP rate limit, conn cap   │                 │
+  │                             │ (reject: HTTP 429 / 503)      │                 │
+  │                             │── GET /api/join/resolve ─────>│                 │
+  │                             │<─ 200 {server_ip, prefs…} ────│                 │
+  │                             │ SERVER_ALLOWLIST check,       │                 │
+  │                             │ build metadata frame,         │                 │
+  │                             │ open UDP socket (no packet)   │                 │
+  │<─ 101 Switching Protocols ──│                               │                 │
+  │<─ metadata frame (0x01) ────│                               │                 │
+  │                             │                               │                 │
+  │── binary WS frame ─────────>│                               │                 │
+  │                             │── UDP datagram ────────────────────────────────>│
+  │                             │<─ UDP datagram ─────────────────────────────────│
+  │<─ binary WS frame ──────────│                               │                 │
+  ┆                             ┆                               ┆                 ┆
 ```
+
+If resolving the join code fails, the proxy still completes the upgrade so it can
+close with a WebSocket close code (4001 / 4003); a failed UDP setup closes with
+4002. A server outside `SERVER_ALLOWLIST` is refused with a plain HTTP 403. See
+[WebSocket close codes](#websocket-close-codes). Resolving consumes the join code,
+so it can't be reused.
 
 ## Metadata frame
 
