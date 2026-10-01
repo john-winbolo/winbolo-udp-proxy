@@ -17,7 +17,6 @@ package main
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,38 +24,11 @@ import (
 	"time"
 )
 
-func TestNormalizePrefs(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string // "" means nil
-	}{
-		{"absent", "", ""},
-		{"empty object", "{}", ""},
-		{"empty object padded", "  {}\n", ""},
-		{"null", "null", ""},
-		{"real prefs", `{"KEYS":{"a":1}}`, `{"KEYS":{"a":1}}`},
-		{"real prefs trimmed", `  {"MENU":{}}  `, `{"MENU":{}}`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := normalizePrefs(json.RawMessage(tc.in))
-			if string(got) != tc.want {
-				t.Fatalf("normalizePrefs(%q) = %q, want %q", tc.in, string(got), tc.want)
-			}
-		})
-	}
-}
-
-func TestBuildMetadataFrameWithPrefs(t *testing.T) {
-	prefs := []byte(`{"KEYS":{"up":1}}`)
-	frame, err := buildMetadataFrame("John", true, "US", prefs)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+func TestBuildMetadataFrame(t *testing.T) {
+	frame := buildMetadataFrame("John", true, "US")
 
 	name := []byte("John")
-	wantLen := 7 + len(name) + len(prefs)
+	wantLen := 7 + len(name) + 2
 	if len(frame) != wantLen {
 		t.Fatalf("frame length = %d, want %d", len(frame), wantLen)
 	}
@@ -76,25 +48,17 @@ func TestBuildMetadataFrameWithPrefs(t *testing.T) {
 	if frame[p+1] != 'U' || frame[p+2] != 'S' {
 		t.Errorf("country = %q%q, want US", []byte{frame[p+1]}, []byte{frame[p+2]})
 	}
-	gotLen := binary.BigEndian.Uint16(frame[p+3 : p+5])
-	if int(gotLen) != len(prefs) {
-		t.Errorf("prefs length prefix = %d, want %d", gotLen, len(prefs))
+	if gotLen := binary.BigEndian.Uint16(frame[p+3 : p+5]); gotLen != 2 {
+		t.Errorf("prefs length prefix = %d, want 2", gotLen)
 	}
-	if string(frame[p+5:]) != string(prefs) {
-		t.Errorf("prefs payload = %q, want %q", frame[p+5:], prefs)
+	if string(frame[p+5:]) != "{}" {
+		t.Errorf("prefs payload = %q, want {}", frame[p+5:])
 	}
 }
 
-func TestBuildMetadataFrameEmptyPrefs(t *testing.T) {
-	frame, err := buildMetadataFrame("Al", false, "", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	name := []byte("Al")
-	if len(frame) != 7+len(name) {
-		t.Fatalf("frame length = %d, want %d", len(frame), 7+len(name))
-	}
-	p := 2 + len(name)
+func TestBuildMetadataFrameNoCountry(t *testing.T) {
+	frame := buildMetadataFrame("Al", false, "")
+	p := 2 + len("Al")
 	if frame[p] != 0x00 {
 		t.Errorf("wbn flag = %#x, want 0x00", frame[p])
 	}
@@ -102,25 +66,12 @@ func TestBuildMetadataFrameEmptyPrefs(t *testing.T) {
 	if frame[p+1] != '?' || frame[p+2] != '?' {
 		t.Errorf("country = %q%q, want ??", []byte{frame[p+1]}, []byte{frame[p+2]})
 	}
-	if gotLen := binary.BigEndian.Uint16(frame[p+3 : p+5]); gotLen != 0 {
-		t.Errorf("prefs length prefix = %d, want 0", gotLen)
-	}
 }
 
 func TestBuildMetadataFrameEmptyNameFallback(t *testing.T) {
-	frame, err := buildMetadataFrame("", false, "GB", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	frame := buildMetadataFrame("", false, "GB")
 	if frame[1] != 1 || frame[2] != '?' {
 		t.Errorf("empty name should fall back to '?', got len=%d byte=%q", frame[1], []byte{frame[2]})
-	}
-}
-
-func TestBuildMetadataFrameOversize(t *testing.T) {
-	huge := []byte("{" + strings.Repeat("a", maxMetadataFrameSize) + "}")
-	if _, err := buildMetadataFrame("John", true, "US", huge); err == nil {
-		t.Fatal("expected error for oversized metadata frame, got nil")
 	}
 }
 

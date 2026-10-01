@@ -16,7 +16,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -41,10 +40,6 @@ const (
 	// (Read returns n == len(buf) with a nil error and the kernel discards the
 	// rest), and the client's bounds-checked parser then drops the frame.
 	maxRelayPacketSize = 2048
-
-	// maxMetadataFrameSize bounds the metadata frame sent to the client on
-	// connect. Unrelated to the UDP path -- it is a WebSocket-only frame.
-	maxMetadataFrameSize = 1024
 
 	udpTimeout       = 30 * time.Second
 	metadataType     = 0x01
@@ -107,10 +102,11 @@ type joinCodeResponse struct {
 	// IsLoggedIn is the source for the metadata frame's WBN-participant flag.
 	IsLoggedIn bool   `json:"is_logged_in"`
 	IPAddress  string `json:"ip_address"`
-	// Prefs is captured verbatim and relayed opaquely to the client. It is a JSON
-	// object such as {"KEYS":{…},"MENU":{…}} or {} when the player has none.
-	Prefs json.RawMessage `json:"prefs"`
 }
+
+// metadataPrefs is the prefs payload sent in every metadata frame. Prefs are no
+// longer relayed from WBN; the client syncs them from WBN's /api/v1/prefs.
+var metadataPrefs = []byte("{}")
 
 type joinCodeError struct {
 	Error string `json:"error"`
@@ -172,27 +168,14 @@ func resolveJoinCode(joinCode string) (*joinCodeResponse, int, error) {
 	return &result, 0, nil
 }
 
-// normalizePrefs returns the prefs JSON as raw bytes to embed, or nil when the
-// player has no prefs. Absent, empty, "{}" and "null" all collapse to nil so the
-// frame carries a zero-length prefs field in those cases. The content is treated
-// as opaque: it is not parsed, validated, or reshaped.
-func normalizePrefs(raw json.RawMessage) []byte {
-	trimmed := bytes.TrimSpace(raw)
-	switch string(trimmed) {
-	case "", "{}", "null":
-		return nil
-	}
-	return trimmed
-}
-
 // buildMetadataFrame builds the binary metadata frame:
 //
 //	[0x01] [name_len] [name_bytes...] [wbn_flag] [cc_byte1] [cc_byte2] [prefs_len_hi] [prefs_len_lo] [prefs_bytes...]
 //
 // Sizes: name_len is a 1-byte length (name is clamped to maxPlayerNameLen).
-// prefs_len is a 2-byte big-endian length because prefs can exceed 255 bytes.
-// The whole frame must fit within maxMetadataFrameSize; an oversized frame is an error.
-func buildMetadataFrame(playerName string, wbn bool, countryCode string, prefs []byte) ([]byte, error) {
+// prefs_len is a 2-byte big-endian length; the prefs payload is always
+// metadataPrefs ("{}"), kept so the frame layout is unchanged for clients.
+func buildMetadataFrame(playerName string, wbn bool, countryCode string) []byte {
 	name := []byte(playerName)
 	if len(name) > maxPlayerNameLen {
 		name = name[:maxPlayerNameLen]
@@ -201,12 +184,8 @@ func buildMetadataFrame(playerName string, wbn bool, countryCode string, prefs [
 		name = []byte("?")
 	}
 
-	total := 7 + len(name) + len(prefs)
-	if total > maxMetadataFrameSize {
-		return nil, fmt.Errorf("metadata frame too large: %d bytes exceeds max frame size %d (prefs=%d bytes)", total, maxMetadataFrameSize, len(prefs))
-	}
-
-	frame := make([]byte, total)
+	prefs := metadataPrefs
+	frame := make([]byte, 7+len(name)+len(prefs))
 	frame[0] = metadataType
 	frame[1] = byte(len(name))
 	copy(frame[2:], name)
@@ -236,12 +215,12 @@ func buildMetadataFrame(playerName string, wbn bool, countryCode string, prefs [
 	}
 	p += 2
 
-	// Prefs: 2-byte big-endian length prefix followed by the raw JSON bytes.
+	// Prefs: 2-byte big-endian length prefix followed by the JSON bytes.
 	binary.BigEndian.PutUint16(frame[p:], uint16(len(prefs)))
 	p += 2
 	copy(frame[p:], prefs)
 
-	return frame, nil
+	return frame
 }
 
 func clientIP(r *http.Request) string {
@@ -332,20 +311,7 @@ func handleClient(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build the metadata frame before upgrading so an oversized prefs blob fails
-	// the connection cleanly rather than mid-relay.
-	prefs := normalizePrefs(resolved.Prefs)
-	metaFrame, err := buildMetadataFrame(resolved.PlayerName, resolved.IsLoggedIn, resolved.CountryCode, prefs)
-	if err != nil {
-		ws, upgradeErr := upgrader.Upgrade(w, r, nil)
-		if upgradeErr != nil {
-			log.Printf("metadata frame error client=%s: %v (upgrade also failed: %v)", clientIP(r), err, upgradeErr)
-			return
-		}
-		log.Printf("metadata frame error client=%s: %v", clientIP(r), err)
-		wsClose(ws, websocket.CloseInternalServerErr, "metadata too large")
-		return
-	}
+	metaFrame := buildMetadataFrame(resolved.PlayerName, resolved.IsLoggedIn, resolved.CountryCode)
 
 	// Resolve and dial UDP before upgrading WebSocket
 	udpAddr, err := net.ResolveUDPAddr("udp4", serverAddr)
@@ -391,8 +357,8 @@ func handleClient(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[%s] metadata frame write error: %v", id, err)
 		return
 	}
-	log.Printf("[%s] METADATA   player=%s country=%s wbn=%v prefs=%dB (%d bytes total)",
-		id, resolved.PlayerName, resolved.CountryCode, resolved.IsLoggedIn, len(prefs), len(metaFrame))
+	log.Printf("[%s] METADATA   player=%s country=%s wbn=%v (%d bytes total)",
+		id, resolved.PlayerName, resolved.CountryCode, resolved.IsLoggedIn, len(metaFrame))
 
 	// Bidirectional relay
 	var (
