@@ -30,7 +30,7 @@ Client                        Proxy                          WBN API         Gam
   │                             │ per-IP rate limit, conn cap   │                 │
   │                             │ (reject: HTTP 429 / 503)      │                 │
   │                             │── GET /api/join/resolve ─────>│                 │
-  │                             │<─ 200 {server_ip, prefs…} ────│                 │
+  │                             │<─ 200 {server_ip, player…} ───│                 │
   │                             │ SERVER_ALLOWLIST check,       │                 │
   │                             │ build metadata frame,         │                 │
   │                             │ open UDP socket (no packet)   │                 │
@@ -63,19 +63,17 @@ Offset   Size  Description
 2+N      1     WBN participant flag (0x00 or 0x01)
 3+N      1     Country code byte 1 (ASCII, e.g. 'U')
 4+N      1     Country code byte 2 (ASCII, e.g. 'S')
-5+N      2     Prefs length L (big-endian uint16, 0 if none)
-7+N      L     Prefs bytes (raw JSON, relayed verbatim)
+5+N      2     Prefs length L (big-endian uint16, always 2)
+7+N      L     Prefs bytes (always the JSON `{}`)
 
-Total: 7 + N + L bytes
+Total: 9 + N bytes
 ```
 
 The player name uses a 1-byte (pascal) length prefix; an empty name is sent as
-`?` and names longer than 32 bytes are truncated. The prefs field uses a **2-byte
-big-endian** length prefix because the prefs JSON can exceed 255 bytes. When the
-player has no prefs the length is `0` and there are no prefs bytes. The whole
-frame must fit within the 1024-byte max metadata frame size (this is separate from
-the 2048-byte game-packet limit); a connection whose metadata would exceed that is
-rejected (WS close 1011).
+`?` and names longer than 32 bytes are truncated. The prefs field is no longer
+populated: it always carries the 2-byte JSON `{}` (length prefix `2`, big-endian).
+It is kept so the frame layout is unchanged for existing clients. Clients load
+prefs from WBN's `/api/v1/prefs` instead.
 
 Field sources from the resolve response:
 
@@ -84,7 +82,7 @@ Field sources from the resolve response:
 | Player name | `player_name` | |
 | WBN participant flag | `is_logged_in` | The resolve response carries `is_logged_in`, not a separate `wbn_participant` flag. |
 | Country code | `country_code` | ISO-3166 alpha-2, captured by WBN when the join code was minted. A 1-char value is space-padded; empty (WBN couldn't geolocate the joiner) ⇒ `??`. |
-| Prefs | `prefs` | Opaque JSON object. For logged-in players WBN sends a trimmed, gameplay-only slice of their saved prefs (`KEYS`, whitelisted `MENU` / `GAME OPTIONS` keys, …); anonymous players or accounts with nothing stored get `{}` ⇒ zero-length. Relayed verbatim, never parsed or reshaped. |
+| Prefs | — | Always `{}`. Any `prefs` field in the resolve response is ignored. |
 
 ### How the client uses it
 
@@ -93,9 +91,8 @@ the frame once, while joining, if the first message starts with `0x01`. Real gam
 packets start with the `'W''B'` magic, so the two can't collide. Only the first
 binary frame after connection is metadata; everything after it is game data.
 
-- **Prefs** are the only field acted on: when non-empty they're applied to the live
-  game (keys, menu toggles, game options) before the first frame. The client later
-  also syncs from WBN's `/api/v1/prefs`, which covers anything the join slice omits.
+- **Prefs** are always `{}`, so there is nothing to apply from the frame. The
+  client gets the player's prefs from WBN's `/api/v1/prefs`.
 - **Name, WBN flag and country** are logged for diagnostics only. The game server
   establishes a web player's identity itself by verifying the join code with WBN,
   so it never trusts these values.
@@ -110,7 +107,6 @@ the client would go straight to game traffic.
 | 4001 | Invalid or expired join code |
 | 4002 | Game server unreachable |
 | 4003 | Join code already consumed (single-use) |
-| 1011 | Metadata frame too large (prefs exceed the 1024-byte frame limit) |
 
 Some rejections happen before the WebSocket upgrade and are plain HTTP errors:
 `400` (missing `join_code`), `403` (server not in `SERVER_ALLOWLIST`), `429` (per-IP
@@ -219,16 +215,13 @@ GET https://<WBN_API_URL>/api/join/resolve?code=<join_code>
   "country_code": "AU",
   "user_id": 42,
   "is_logged_in": true,
-  "ip_address": "5.6.7.8",
-  "prefs": { "KEYS": {}, "MENU": {}, "GAME OPTIONS": {} }
+  "ip_address": "5.6.7.8"
 }
 ```
 
 `server_ip` is the canonical game-server address field. `is_logged_in` drives the
 metadata frame's WBN-participant flag, and `country_code` is `""` when WBN couldn't
-geolocate the joiner. `prefs` is a trimmed, gameplay-only slice of a logged-in
-player's saved prefs (`{}` for anonymous players or when nothing is stored). It is
-relayed to the client verbatim; the proxy never parses or reshapes it.
+geolocate the joiner. Any other fields (such as `prefs`) are ignored.
 
 **Invalid/expired (404):**
 ```json
@@ -289,7 +282,7 @@ The browser client lives in the [winbolo repo](https://github.com/john-winbolo/w
 | Path | What it does |
 |---|---|
 | [`src/bolo/transport_udp_client.c`](https://github.com/john-winbolo/winbolo/blob/main/src/bolo/transport_udp_client.c) | Client network transport. On the web build it runs over this proxy's WebSocket and consumes the `0x01` metadata frame (`udpClientProcessPacket`, `transportUdpParseProxyMeta`) |
-| [`src/wasm/main_wasm.c`](https://github.com/john-winbolo/winbolo/blob/main/src/wasm/main_wasm.c) | Browser entry point; `wasmApplyJoinPrefs` applies the prefs carried in the metadata frame |
+| [`src/wasm/main_wasm.c`](https://github.com/john-winbolo/winbolo/blob/main/src/wasm/main_wasm.c) | Browser entry point; `wasmApplyJoinPrefs` applies the metadata frame's prefs (now always `{}`) |
 | [`src/wasm/prefs_bridge_wasm.c`](https://github.com/john-winbolo/winbolo/blob/main/src/wasm/prefs_bridge_wasm.c) | Cloud prefs sync against WBN's `/api/v1/prefs` |
 | [`src/wasm/`](https://github.com/john-winbolo/winbolo/tree/main/src/wasm) | The rest of the Emscripten build (shell page, sound, voice, stubs) |
 
@@ -410,7 +403,7 @@ The proxy logs connection lifecycle events with microsecond timestamps and per-c
 join code API request: GET https://wbn.winbolo.net/api/join/resolve?code=abc123...
 join code API response: status=200 content-type=application/json body="{\"server_ip\":\"1.2.3.4\",...}"
 [conn#1] CONNECT    client=5.6.7.8 server=1.2.3.4:27500 udp-local=0.0.0.0:44001 player=John country=US wbn=true
-[conn#1] METADATA   player=John country=US wbn=true prefs=112B (123 bytes total)
+[conn#1] METADATA   player=John country=US wbn=true (13 bytes total)
 [conn#1] WS->UDP   42 bytes (total pkts=1 bytes=42)
 [conn#1] UDP->WS   128 bytes (total pkts=1 bytes=128)
 [conn#1] DISCONNECT client=5.6.7.8 server=1.2.3.4:27500  ws->udp pkts=150 bytes=6300  udp->ws pkts=200 bytes=25600
@@ -426,7 +419,7 @@ rejected client=5.6.7.8 server=9.9.9.9:27500 (not in allowlist)
 ```
 
 Note that the `join code API response` line logs the full resolve body, including
-the player's IP address and prefs.
+the player's IP address (and prefs, if WBN still sends them).
 
 ## Production checklist
 
